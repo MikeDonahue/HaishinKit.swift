@@ -175,7 +175,7 @@ open class RTMPStream: NetStream {
         case swap
         case `switch`
     }
-
+    
     public struct PlayOption {
         public var len: Double = 0
         public var offset: Double = 0
@@ -183,6 +183,13 @@ open class RTMPStream: NetStream {
         public var start: Double = 0
         public var streamName: String = ""
         public var transition: PlayTransition = .switch
+    }
+    
+    public struct AdaptiveBitrateSettings {
+        public var increaseMultiplier: Double = 1.05
+        public var decreaseMultiplier: Double = 0.9
+        public var maximumBitrate: Int32 = H264Encoder.defaultMaximumBitrate
+        public var minimumBitrate: Int32 = H264Encoder.defaultMinimumBitrate
     }
 
     public enum HowToPublish: String {
@@ -289,6 +296,11 @@ open class RTMPStream: NetStream {
     private var videoWasSent: Bool = false
     private var howToPublish: RTMPStream.HowToPublish = .live
     private var rtmpConnection: RTMPConnection
+    
+    public var useAdaptiveBitrate: Bool = false
+    public var adaptiveSettings: AdaptiveBitrateSettings = AdaptiveBitrateSettings()
+    
+    private(set) var hasPublishInsufficientBandwidth = false
 
     public init(connection: RTMPConnection) {
         self.rtmpConnection = connection
@@ -303,6 +315,29 @@ open class RTMPStream: NetStream {
     deinit {
         mixer.stopRunning()
         rtmpConnection.removeEventListener(Event.RTMP_STATUS, selector: #selector(on(status:)), observer: self)
+    }
+    
+    open func adaptToDecreasedBandwidth() {
+        guard useAdaptiveBitrate else { return }
+        guard var currentBitrate = videoSettings["bitrate"] as? Int32 else { return }
+        currentBitrate = max(adaptiveSettings.minimumBitrate, Int32(Double(currentBitrate) * adaptiveSettings.decreaseMultiplier))
+        
+        print("Decrease bitrate to \(currentBitrate)")
+        videoSettings["bitrate"] = currentBitrate
+        hasPublishInsufficientBandwidth = true
+    }
+    
+    open func adaptToRecoveredBandwidth() {
+        guard hasPublishInsufficientBandwidth && useAdaptiveBitrate else { return }
+        guard var currentBitrate = videoSettings["bitrate"] as? Int32 else { return }
+        currentBitrate = min(adaptiveSettings.maximumBitrate, Int32(Double(currentBitrate) * adaptiveSettings.increaseMultiplier))
+
+        if currentBitrate == adaptiveSettings.maximumBitrate {
+            hasPublishInsufficientBandwidth = false
+        }
+        
+        print("Increase bitrate to \(currentBitrate)")
+        videoSettings["bitrate"] = currentBitrate
     }
 
     open func receiveAudio(_ flag: Bool) {

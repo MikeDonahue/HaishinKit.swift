@@ -24,6 +24,8 @@ final class H264Encoder: NSObject {
     static let defaultWidth: Int32 = 480
     static let defaultHeight: Int32 = 272
     static let defaultBitrate: UInt32 = 160 * 1024
+    static let defaultMaximumBitrate: Int32 = 160 * 1024
+    static let defaultMinimumBitrate: Int32 = 80 * 1024
     static let defaultScalingMode: String = "Trim"
 
     #if os(iOS)

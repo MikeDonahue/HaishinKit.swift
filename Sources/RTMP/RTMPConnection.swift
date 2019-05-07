@@ -179,12 +179,15 @@ open class RTMPConnection: EventDispatcher {
     open var totalStreamsCount: Int {
         return streams.count
     }
+    
     /// The statistics of outgoing queue bytes per second.
     @objc open dynamic private(set) var previousQueueBytesOut: [Int64] = []
     /// The statistics of incoming bytes per second.
     @objc open dynamic private(set) var currentBytesInPerSecond: Int32 = 0
     /// The statistics of outgoing bytes per second.
     @objc open dynamic private(set) var currentBytesOutPerSecond: Int32 = 0
+    
+    private var consecutiveSufficientBandwidthCount = 0
 
     var socket: RTMPSocketCompatible!
     var streams: [UInt32: RTMPStream] = [: ]
@@ -419,24 +422,61 @@ open class RTMPConnection: EventDispatcher {
     private func on(timer: Timer) {
         let totalBytesIn: Int64 = self.totalBytesIn
         let totalBytesOut: Int64 = self.totalBytesOut
+        
         currentBytesInPerSecond = Int32(totalBytesIn - previousTotalBytesIn)
         currentBytesOutPerSecond = Int32(totalBytesOut - previousTotalBytesOut)
+        
         previousTotalBytesIn = totalBytesIn
         previousTotalBytesOut = totalBytesOut
+        
         previousQueueBytesOut.append(socket.queueBytesOut)
+        
+        var queueBytesOutAllZero = false
+        
         for (_, stream) in streams {
             stream.on(timer: timer)
         }
+        
         if measureInterval <= previousQueueBytesOut.count {
             var count: Int = 0
+            
+            print(previousQueueBytesOut)
             for i in 0..<previousQueueBytesOut.count - 1 where previousQueueBytesOut[i] < previousQueueBytesOut[i + 1] {
                 count += 1
             }
-            if count == measureInterval - 1 {
+            
+            // If count is zero, we have a healthy stream.
+            if count == 0 {
+                // Check if all the samples are 0
+                let sum = previousQueueBytesOut.reduce(0, { x, y in
+                    x + y
+                })
+                
+                // If so, increment the counter used to determine bitrate recovery
+                if sum == 0 {
+                    consecutiveSufficientBandwidthCount += 1
+                } else {
+                    // Else, we reset the counter signifying the stream is healthy,
+                    // but not quite healthy enough to increase the bitrate again.
+                    consecutiveSufficientBandwidthCount = 0
+                }
+                
+                // If we've hit enough samples of a healthy stream (By default, double the
+                // interval it takes to decide to lower the bandwidth), tell the streams to
+                // adapt accordingly
+                if consecutiveSufficientBandwidthCount == measureInterval * 2 {
+                    consecutiveSufficientBandwidthCount = 0
+                    for (_, stream) in streams {
+                        stream.adaptToRecoveredBandwidth()
+                    }
+                }
+            } else if count == measureInterval - 1 {
+                consecutiveSufficientBandwidthCount = 0
                 for (_, stream) in streams {
-                    stream.delegate?.didPublishInsufficientBW(stream, withConnection: self)
+                    stream.adaptToDecreasedBandwidth()
                 }
             }
+            
             previousQueueBytesOut.removeFirst()
         }
     }
