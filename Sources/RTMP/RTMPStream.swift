@@ -186,8 +186,8 @@ open class RTMPStream: NetStream {
     }
     
     public struct AdaptiveBitrateSettings {
-        public var increaseMultiplier: Double = 1.05
-        public var decreaseMultiplier: Double = 0.9
+        public var increaseMultiplier: Double = 1.125
+        public var decreaseMultiplier: Double = 0.8
         public var maximumBitrate: Int32 = H264Encoder.defaultMaximumBitrate
         public var minimumBitrate: Int32 = H264Encoder.defaultMinimumBitrate
     }

@@ -235,6 +235,7 @@ open class RTMPConnection: EventDispatcher {
     private var arguments: [Any?] = []
     private var currentChunk: RTMPChunk?
     private var measureInterval: Int = 3
+    private var adaptiveRecoveryInterval: Int = 4
     private var fragmentedChunks: [UInt16: RTMPChunk] = [: ]
     private var previousTotalBytesIn: Int64 = 0
     private var previousTotalBytesOut: Int64 = 0
@@ -280,7 +281,7 @@ open class RTMPConnection: EventDispatcher {
         }
         self.uri = uri
         self.arguments = arguments
-        timer = Timer(timeInterval: 1.0, target: self, selector: #selector(on(timer:)), userInfo: nil, repeats: true)
+        timer = Timer(timeInterval: 2, target: self, selector: #selector(on(timer:)), userInfo: nil, repeats: true)
         switch scheme {
         case "rtmpt", "rtmpts":
             socket = socket is RTMPTSocket ? socket : RTMPTSocket()
@@ -464,7 +465,7 @@ open class RTMPConnection: EventDispatcher {
                 // If we've hit enough samples of a healthy stream (By default, double the
                 // interval it takes to decide to lower the bandwidth), tell the streams to
                 // adapt accordingly
-                if consecutiveSufficientBandwidthCount == measureInterval * 2 {
+                if consecutiveSufficientBandwidthCount == adaptiveRecoveryInterval {
                     consecutiveSufficientBandwidthCount = 0
                     for (_, stream) in streams {
                         stream.adaptToRecoveredBandwidth()
