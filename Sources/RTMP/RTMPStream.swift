@@ -186,10 +186,16 @@ open class RTMPStream: NetStream {
     }
     
     public struct AdaptiveBitrateSettings {
-        public var increaseMultiplier: Double = 1.125
-        public var decreaseMultiplier: Double = 0.8
+        public var increaseMultiplier: Double = 1.1
+        public var decreaseMultiplier: Double = 0.75
+        public var majorDecreaseMultiplier: Double = 0.5
         public var maximumBitrate: Int32 = H264Encoder.defaultMaximumBitrate
         public var minimumBitrate: Int32 = H264Encoder.defaultMinimumBitrate
+        
+        let secondsDelayToRecoverFromDecreasedBitrate: TimeInterval = 10
+        let secondsDelayToDecreaseBitrateAgain: TimeInterval = 10
+        let secondsDelayToIncreaseBitrateAgain: TimeInterval = 5
+        let secondsDelayToAdaptAfterPublish: TimeInterval = 8
     }
 
     public enum HowToPublish: String {
@@ -216,7 +222,7 @@ open class RTMPStream: NetStream {
     #if !os(tvOS)
     public static var defaultOrientation: AVCaptureVideoOrientation?
     #endif
-    open weak var delegate: RTMPStreamDelegate?
+    open weak var adaptiveDelegate: RTMPStreamAdaptiveDelegate?
     open internal(set) var info = RTMPStreamInfo()
     open private(set) var objectEncoding: UInt8 = RTMPConnection.defaultObjectEncoding
     @objc open private(set) dynamic var currentFPS: UInt16 = 0
@@ -254,7 +260,7 @@ open class RTMPStream: NetStream {
                 currentFPS = 0
                 frameCount = 0
                 info.clear()
-                delegate?.clear()
+                adaptiveDelegate?.rtmpStreamShouldResetBitrate(self)
             case .playing:
                 mixer.startPlaying(rtmpConnection.audioEngine)
             case .publish:
@@ -296,11 +302,14 @@ open class RTMPStream: NetStream {
     private var videoWasSent: Bool = false
     private var howToPublish: RTMPStream.HowToPublish = .live
     private var rtmpConnection: RTMPConnection
+    private var publishStartDate = Date()
+    private var lastAdaptiveBitrateDecrease: Date?
+    private var lastAdaptiveBitrateIncrease: Date?
     
     public var useAdaptiveBitrate: Bool = false
     public var adaptiveSettings: AdaptiveBitrateSettings = AdaptiveBitrateSettings()
     
-    private(set) var hasPublishInsufficientBandwidth = false
+    private(set) var hasPublishedInsufficientBandwidth = false
 
     public init(connection: RTMPConnection) {
         self.rtmpConnection = connection
@@ -317,27 +326,75 @@ open class RTMPStream: NetStream {
         rtmpConnection.removeEventListener(Event.RTMP_STATUS, selector: #selector(on(status:)), observer: self)
     }
     
-    open func adaptToDecreasedBandwidth() {
-        guard useAdaptiveBitrate else { return }
+    open func adaptToMinorlyDecreasedBandwidth() {
+        adaptToDecreasedBandwidthWithMultiplier(adaptiveSettings.decreaseMultiplier)
+    }
+    
+    open func adaptToMajorlyDecreasedBandwidth() {
+        adaptToDecreasedBandwidthWithMultiplier(adaptiveSettings.majorDecreaseMultiplier)
+    }
+    
+    private func adaptToDecreasedBandwidthWithMultiplier(_ multiplier: Double) {
+        guard useAdaptiveBitrate && readyState == .publishing else { return }
         guard var currentBitrate = videoSettings["bitrate"] as? Int32 else { return }
-        currentBitrate = max(adaptiveSettings.minimumBitrate, Int32(Double(currentBitrate) * adaptiveSettings.decreaseMultiplier))
+        guard currentBitrate > adaptiveSettings.minimumBitrate else { return }
+        guard abs(publishStartDate.timeIntervalSinceNow) >= adaptiveSettings.secondsDelayToAdaptAfterPublish else {
+            return
+        }
         
-        print("Decrease bitrate to \(currentBitrate)")
-        videoSettings["bitrate"] = currentBitrate
-        hasPublishInsufficientBandwidth = true
+        var shouldDecrease = true
+        
+        // Mark shouldIncrease false if enough time hasn't passed since the last decrease
+        if let lastDecrease = lastAdaptiveBitrateDecrease, abs(lastDecrease.timeIntervalSinceNow) < adaptiveSettings.secondsDelayToDecreaseBitrateAgain {
+            shouldDecrease = false
+        }
+        
+        if shouldDecrease {
+            // Calculate new bitrate based on the decrease multiplier
+            currentBitrate = max(adaptiveSettings.minimumBitrate, Int32(Double(currentBitrate) * adaptiveSettings.decreaseMultiplier))
+            videoSettings["bitrate"] = currentBitrate
+            hasPublishedInsufficientBandwidth = true
+            lastAdaptiveBitrateDecrease = Date()
+            adaptiveDelegate?.rtmpStream(self, didDecreaseBitrate: currentBitrate)
+        }
     }
     
     open func adaptToRecoveredBandwidth() {
-        guard hasPublishInsufficientBandwidth && useAdaptiveBitrate else { return }
+        // Make sure we're using adaptive bitrate, and that we've already reduced the bitrate before.
+        // Also make sure we have a date for the last decrease so we can check if enough time has
+        // passed to do another bitrate increase.
+        guard useAdaptiveBitrate && readyState == .publishing else { return }
         guard var currentBitrate = videoSettings["bitrate"] as? Int32 else { return }
-        currentBitrate = min(adaptiveSettings.maximumBitrate, Int32(Double(currentBitrate) * adaptiveSettings.increaseMultiplier))
-
-        if currentBitrate == adaptiveSettings.maximumBitrate {
-            hasPublishInsufficientBandwidth = false
+        guard currentBitrate < adaptiveSettings.maximumBitrate else { return }
+        guard abs(publishStartDate.timeIntervalSinceNow) >= adaptiveSettings.secondsDelayToAdaptAfterPublish else {
+            return
         }
         
-        print("Increase bitrate to \(currentBitrate)")
-        videoSettings["bitrate"] = currentBitrate
+        var shouldIncrease = true
+        
+        if let lastDecrease = lastAdaptiveBitrateDecrease, abs(lastDecrease.timeIntervalSinceNow) < adaptiveSettings.secondsDelayToRecoverFromDecreasedBitrate {
+            shouldIncrease = false
+        }
+        
+        // Mark shouldIncrease false if enough time hasn't passed since the last increase
+        if let lastIncrease = lastAdaptiveBitrateIncrease, abs(lastIncrease.timeIntervalSinceNow) < adaptiveSettings.secondsDelayToIncreaseBitrateAgain {
+            shouldIncrease = false
+        }
+        
+        if shouldIncrease {
+            currentBitrate = min(adaptiveSettings.maximumBitrate, Int32(Double(currentBitrate) * adaptiveSettings.increaseMultiplier))
+            videoSettings["bitrate"] = currentBitrate
+            lastAdaptiveBitrateIncrease = Date()
+            adaptiveDelegate?.rtmpStream(self, didIncreaseBitrate: currentBitrate)
+        }
+        
+        // If we've hit the max bitrate, we can mark the flag that we've decreased our bitrate false
+        // and reset the times of our increases/decreases.
+        if currentBitrate == adaptiveSettings.maximumBitrate {
+            hasPublishedInsufficientBandwidth = false
+            lastAdaptiveBitrateDecrease = nil
+            lastAdaptiveBitrateIncrease = nil
+        }
     }
 
     open func receiveAudio(_ flag: Bool) {
@@ -492,6 +549,8 @@ open class RTMPStream: NetStream {
                     commandObject: nil,
                     arguments: [name, type == .localRecord ? RTMPStream.HowToPublish.live.rawValue : type.rawValue]
             )), locked: nil)
+            
+            self.publishStartDate = Date()
         }
     }
 
@@ -549,6 +608,7 @@ open class RTMPStream: NetStream {
 
     open func resume() {
         lockQueue.async {
+            self.publishStartDate = Date()
             self.paused = false
             switch self.readyState {
             case .publish, .publishing:

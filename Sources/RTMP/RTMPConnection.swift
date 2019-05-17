@@ -234,8 +234,8 @@ open class RTMPConnection: EventDispatcher {
     private var messages: [UInt16: RTMPMessage] = [: ]
     private var arguments: [Any?] = []
     private var currentChunk: RTMPChunk?
-    private var measureInterval: Int = 3
-    private var adaptiveRecoveryInterval: Int = 4
+    private var measureInterval: Int = 4
+    private var adaptiveRecoveryInterval: Int = 6
     private var fragmentedChunks: [UInt16: RTMPChunk] = [: ]
     private var previousTotalBytesIn: Int64 = 0
     private var previousTotalBytesOut: Int64 = 0
@@ -281,7 +281,8 @@ open class RTMPConnection: EventDispatcher {
         }
         self.uri = uri
         self.arguments = arguments
-        timer = Timer(timeInterval: 2, target: self, selector: #selector(on(timer:)), userInfo: nil, repeats: true)
+        timer?.invalidate()
+        timer = Timer(timeInterval: 1, target: self, selector: #selector(on(timer:)), userInfo: nil, repeats: true)
         switch scheme {
         case "rtmpt", "rtmpts":
             socket = socket is RTMPTSocket ? socket : RTMPTSocket()
@@ -441,7 +442,6 @@ open class RTMPConnection: EventDispatcher {
         if measureInterval <= previousQueueBytesOut.count {
             var count: Int = 0
             
-            print(previousQueueBytesOut)
             for i in 0..<previousQueueBytesOut.count - 1 where previousQueueBytesOut[i] < previousQueueBytesOut[i + 1] {
                 count += 1
             }
@@ -471,10 +471,17 @@ open class RTMPConnection: EventDispatcher {
                         stream.adaptToRecoveredBandwidth()
                     }
                 }
-            } else if count == measureInterval - 1 {
-                consecutiveSufficientBandwidthCount = 0
-                for (_, stream) in streams {
-                    stream.adaptToDecreasedBandwidth()
+            } else {
+                if count == measureInterval - 2 {
+                    consecutiveSufficientBandwidthCount = 0
+                    for (_, stream) in streams {
+                        stream.adaptToMinorlyDecreasedBandwidth()
+                    }
+                } else if count == measureInterval - 1 {
+                    consecutiveSufficientBandwidthCount = 0
+                    for (_, stream) in streams {
+                        stream.adaptToMajorlyDecreasedBandwidth()
+                    }
                 }
             }
             
